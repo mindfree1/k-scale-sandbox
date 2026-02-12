@@ -181,6 +181,79 @@ function deriveSpace(){
   };
 }
 
+function getEarthStage(){
+  const earth = RUN.state.earth;
+  const der = deriveEarth();
+
+  if(earth.reliability < 95 || earth.heatStress > 80) return 0;
+  if(der.usablePowerTW >= 40 && earth.reliability >= 99 && earth.heatStress <= 70) return 4;
+  if(der.usablePowerTW >= 35 && earth.emissionsIndex <= 40) return 3;
+  if(earth.reliability >= 98 && der.usablePowerTW >= 25) return 2;
+  if(earth.reliability >= 95 && earth.reliability <= 98) return 1;
+  return 1;
+}
+
+function getSpaceStage(){
+  const s = deriveSpace();
+  if(s.odcTurnsOperational >= 4 && s.totalComputeDelivered >= 200) return 4;
+  if(s.totalComputeDelivered > 0 && s.odcTurnsOperational >= 1) return 3;
+  if(s.lrl >= 2 && s.orbitPowerMW >= 50) return 2;
+  if(s.lrl >= 1) return 1;
+  return 0;
+}
+
+function getPerformanceMood(){
+  const earth = RUN.state.earth;
+  const earthDer = deriveEarth();
+  const space = deriveSpace();
+  const orbit = sumOrbit();
+
+  const reliabilityStreak = RUN.state.flags.reliabilityBelow92Streak || 0;
+  const streakLimit = CONFIG.constants.lose.reliabilityBelow92_consecutiveTurns || 3;
+  const streakRisk = reliabilityStreak >= Math.max(1, streakLimit - 1);
+  const thermalDanger = orbit.effectiveComputeLoadMW > 0 && orbit.throttleFactor < 0.7;
+  const nearLose = earth.heatStress > 90 || streakRisk;
+
+  if(RUN.lost || nearLose || thermalDanger) return "red";
+
+  const conditions = [
+    earthDer.usablePowerTW >= CONFIG.constants.win.usablePowerTW_min,
+    earth.reliability >= CONFIG.constants.win.reliability_min,
+    earth.heatStress <= CONFIG.constants.win.heatStress_max,
+    space.odcTurnsOperational >= CONFIG.constants.win.odcTurnsOperational_min,
+    space.totalComputeDelivered >= CONFIG.constants.win.computeDelivered_min
+  ];
+  const done = conditions.filter(Boolean).length;
+
+  const turnProgress = RUN.turn / CONFIG.constants.turnLimit;
+  const winProgress = computeWinProgress();
+  const behind = (winProgress + 0.15 < turnProgress) || (done <= 1 && RUN.turn > Math.floor(CONFIG.constants.turnLimit * 0.5));
+  return behind ? "amber" : "green";
+}
+
+function getActiveTab(){
+  return $(".tab.active")?.getAttribute("data-tab") || "earth";
+}
+
+function applyStagePresentation(preferredTab){
+  const earthStage = `E${getEarthStage()}`;
+  const spaceStage = `S${getSpaceStage()}`;
+  const mood = getPerformanceMood();
+  const view = preferredTab || getActiveTab();
+
+  const useSpaceBg = view === "space";
+  const image = useSpaceBg ? `space_${spaceStage}.webp` : `earth_${earthStage}.webp`;
+
+  document.body.dataset.earthStage = earthStage;
+  document.body.dataset.spaceStage = spaceStage;
+  document.body.dataset.mood = mood;
+  document.body.dataset.view = view;
+  document.body.style.setProperty("--stage-bg", `url("assets/bg/${image}")`);
+
+  const chip = $("#stage-chip");
+  if(chip) chip.textContent = `${earthStage} / ${spaceStage} / ${mood.toUpperCase()}`;
+}
+
 function currentFailureChance(action){
   let fail = action.baseFailureChance;
 
@@ -775,6 +848,8 @@ function render(){
   renderSpaceTab();
   renderTechTab();
   renderReportsTab();
+
+  applyStagePresentation();
 }
 
 
@@ -803,6 +878,9 @@ function renderDashboard(){
   const earthDer = deriveEarth();
   const earth = RUN.state.earth;
   const space = deriveSpace();
+  const earthStage = `E${getEarthStage()}`;
+  const spaceStage = `S${getSpaceStage()}`;
+  const mood = getPerformanceMood();
 
   const conditions = [
     earthDer.usablePowerTW >= CONFIG.constants.win.usablePowerTW_min,
@@ -846,6 +924,21 @@ function renderDashboard(){
       <div class="kpi">
         <div class="label">Win Checklist</div>
         <div class="value mono">${done}/5</div>
+      </div>
+    </div>
+
+    <div class="kpi-grid stage-strip">
+      <div class="kpi">
+        <div class="label">Earth Stage</div>
+        <div class="value mono">${earthStage}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Space Stage</div>
+        <div class="value mono">${spaceStage}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Performance Mood</div>
+        <div class="value mono">${mood.toUpperCase()}</div>
       </div>
     </div>
 
@@ -1587,6 +1680,7 @@ function initTabs(){
     const tab = btn.getAttribute("data-tab");
     $$(".panel").forEach(p=>p.classList.remove("active"));
     $("#panel-"+tab).classList.add("active");
+    applyStagePresentation(tab);
   }));
 }
 
