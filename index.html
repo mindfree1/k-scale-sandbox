@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>K-Scale Sandbox (V0)</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <div class="title">K-Scale Sandbox <span class="badge">V0</span></div>
+      <div class="subtitle" id="subtitle">Turn 1 / 18</div>
+    </div>
+    <div class="header-right">
+      <button id="btn-new" class="btn btn-ghost" title="Reset run">New Run</button>
+    </div>
+  </header>
+
+  <section class="dashboard" id="dashboard"></section>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="earth">Earth</button>
+    <button class="tab" data-tab="space">Space</button>
+    <button class="tab" data-tab="tech">Tech</button>
+    <button class="tab" data-tab="reports">Reports</button>
+  </nav>
+
+  <main class="main">
+    <section class="panel active" id="panel-earth"></section>
+    <section class="panel" id="panel-space"></section>
+    <section class="panel" id="panel-tech"></section>
+    <section class="panel" id="panel-reports"></section>
+  </main>
+
+  <footer class="actionbar" id="actionbar"></footer>
+
+  <div class="modal" id="modal" aria-hidden="true">
+    <div class="modal-backdrop" data-close="true"></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-header">
+        <div id="modal-title" class="modal-title">Details</div>
+        <button class="btn btn-ghost" data-close="true">✕</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
