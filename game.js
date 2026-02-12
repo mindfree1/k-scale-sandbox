@@ -8,7 +8,7 @@ const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
 
 function clamp(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
-function fmt(n, digits=0){ return Number.isFinite(n) ? n.toFixed(digits) : "—"; }
+function fmt(n, digits=0){ return Number.isFinite(n) ? n.toFixed(digits) : "--"; }
 function deepClone(obj){ return JSON.parse(JSON.stringify(obj)); }
 
 // ---------- Game state ----------
@@ -24,6 +24,7 @@ function newRun(){
     // builtCounts is stored in earth.builtCounts; we'll also store it in a flat map for convenience.
     state: base,
     queue: [],
+    lastSummary: null,
     lastEvent: null,
     lastReport: null,
     won: false,
@@ -244,6 +245,29 @@ function queueCost(){
   return total;
 }
 
+function creditsRemaining(){
+  return RUN.credits - queueCost();
+}
+function canAfford(cost){
+  return creditsRemaining() >= cost;
+}
+function formatCredits(n){
+  return `C${fmt(n,0)}`;
+}
+function budgetGuard(requiredCost, label){
+  const remaining = creditsRemaining();
+  if(remaining >= requiredCost) return true;
+  const missing = Math.max(0, requiredCost - remaining);
+  toast(`Cannot queue ${label}: need ${formatCredits(requiredCost)}, only ${formatCredits(remaining)} remaining after queued items (short ${formatCredits(missing)}).`);
+  return false;
+}
+function reasonLine(reason){
+  return `<span class="r bad">X ${reason}</span>`;
+}
+function reqLine(label, ok){
+  const cls = ok ? "ok" : "bad";
+  return `<span class="r ${cls}">${ok ? "OK" : "X"} ${label}</span>`;
+}
 function computePayloadLaunchCost(payloadMass_t){
   let base = CONFIG.constants.launchEconomics.payloadLaunchBaseCost;
   if(hasBuilt("B_LAUNCH_FACTORY")) base += (CONFIG.constants.launchEconomics.ifBuilt_B_LAUNCH_FACTORY?.payloadLaunchBaseCostDelta || 0);
@@ -288,6 +312,14 @@ function endTurn(){
     toast("Not enough credits for queued actions.");
     return;
   }
+
+  const prevSnapshot = {
+    credits: RUN.credits,
+    earthDer: deriveEarth(),
+    earth: deepClone(RUN.state.earth),
+    spaceDer: deriveSpace(),
+    space: deepClone(RUN.state.space)
+  };
 
   // Deduct spend upfront.
   RUN.credits -= spend;
@@ -674,6 +706,28 @@ function endTurn(){
     }
   };
 
+  const nextEarth = deriveEarth();
+  const nextSpace = deriveSpace();
+  const deltaUsablePower = nextEarth.usablePowerTW - prevSnapshot.earthDer.usablePowerTW;
+  const deltaReliability = RUN.state.earth.reliability - prevSnapshot.earth.reliability;
+  const deltaHeatStress = RUN.state.earth.heatStress - prevSnapshot.earth.heatStress;
+  const deltaCredits = RUN.credits - prevSnapshot.credits;
+  const deltaLRL = RUN.state.space.launchReadinessLevel - prevSnapshot.space.launchReadinessLevel;
+  const deltaCompute = RUN.state.space.totalComputeDelivered - prevSnapshot.space.totalComputeDelivered;
+
+  RUN.lastSummary = {
+    headline: `Turn ${RUN.turn} Summary`,
+    sub: `${event.name}${RUN.won ? "  |  Victory achieved" : RUN.lost ? "  |  Run ended" : ""}`,
+    deltas: [
+      { label:"Usable Power", value:`${deltaUsablePower >= 0 ? "+" : ""}${fmt(deltaUsablePower,1)} TW` },
+      { label:"Reliability", value:`${deltaReliability >= 0 ? "+" : ""}${fmt(deltaReliability,1)}%` },
+      { label:"Heat Stress", value:`${deltaHeatStress >= 0 ? "+" : ""}${fmt(deltaHeatStress,1)}` },
+      { label:"Credits", value:`${deltaCredits >= 0 ? "+" : ""}${formatCredits(deltaCredits)}` },
+      { label:"LRL", value:`${deltaLRL >= 0 ? "+" : ""}${fmt(deltaLRL,0)}` },
+      { label:"Compute Delivered", value:`${deltaCompute >= 0 ? "+" : ""}${fmt(deltaCompute,1)} CU` }
+    ]
+  };
+
   // Clear queue
   RUN.queue = [];
 
@@ -715,6 +769,7 @@ function render(){
 
   renderDashboard();
   renderActionBar();
+  renderSummaryBanner();
 
   renderEarthTab();
   renderSpaceTab();
@@ -722,6 +777,28 @@ function render(){
   renderReportsTab();
 }
 
+
+function renderSummaryBanner(){
+  const el = $("#summary");
+  if(!el) return;
+  const s = RUN.lastSummary;
+  if(!s){
+    el.innerHTML = "";
+    return;
+  }
+  const deltas = (s.deltas||[]).map(d=>{
+    const cls = d.value.startsWith("+") ? "pos" : (d.value.startsWith("-") ? "neg" : "");
+    return `<span class="delta ${cls}">${d.label}: ${d.value}</span>`;
+  }).join("");
+  el.innerHTML = `
+    <div class="summary-card">
+      <div class="headline">${s.headline}</div>
+      <div class="muted">${s.sub || ""}</div>
+      <div style="height:8px"></div>
+      <div class="delta-row">${deltas}</div>
+    </div>
+  `;
+}
 function renderDashboard(){
   const earthDer = deriveEarth();
   const earth = RUN.state.earth;
@@ -738,11 +815,28 @@ function renderDashboard(){
 
   const prog = Math.round(computeWinProgress()*100);
 
+
+  const milestones = [
+    { id:"m_lrl1", label:"LRL 1: Suborbital proven", ok: RUN.state.space.launchReadinessLevel >= 1 },
+    { id:"m_lrl2", label:"LRL 2: Orbital demo", ok: RUN.state.space.launchReadinessLevel >= 2 },
+    { id:"m_orbit_core", label:"Orbit core: Solar + Radiators", ok: (deriveSpace().orbitPowerMW >= 50) && (deriveSpace().radiatorMWth >= 80) },
+    { id:"m_lrl3", label:"LRL 3: Operational reliability", ok: RUN.state.space.launchReadinessLevel >= 3 },
+    { id:"m_compute", label:`Compute delivered: ${Math.floor(deriveSpace().totalComputeDelivered)} / ${CONFIG.constants.win.computeDelivered_min} CU`, ok: deriveSpace().totalComputeDelivered >= CONFIG.constants.win.computeDelivered_min }
+  ];
+  const milestonesHtml = `
+    <div class="card milestones">
+      <div class="card-title">Next Milestones</div>
+      <div class="card-subtitle">Tiny guide rails so it feels like a game, not a spreadsheet.</div>
+      <div style="height:6px"></div>
+      ${milestones.map(m=>`<div class="m ${m.ok?"done":""}"><div class="box">${m.ok?"OK":""}</div><div class="txt">${m.label}</div></div>`).join("")}
+    </div>
+  `;
+
   const html = `
     <div class="kpi-grid">
       <div class="kpi">
         <div class="label">Credits</div>
-        <div class="value mono">₡${fmt(RUN.credits,0)}</div>
+        <div class="value mono">C${fmt(RUN.credits,0)}</div>
       </div>
       <div class="kpi">
         <div class="label">Win Progress</div>
@@ -775,7 +869,7 @@ function renderDashboard(){
       <div class="kpi">
         <div class="label">Emissions</div>
         <div class="value mono">${fmt(earth.emissionsIndex,0)}</div>
-        <div class="hint">Index (0–100)</div>
+        <div class="hint">Index (0-100)</div>
       </div>
     </div>
 
@@ -784,7 +878,7 @@ function renderDashboard(){
       <div class="kpi">
         <div class="label">LRL</div>
         <div class="value mono">${space.lrl}</div>
-        <div class="hint">0–3 (3 to deploy compute racks)</div>
+        <div class="hint">0-3 (3 to deploy compute racks)</div>
       </div>
       <div class="kpi">
         <div class="label">Orbit Power</div>
@@ -801,9 +895,9 @@ function renderDashboard(){
       </div>
     </div>
 
-    ${RUN.won ? `<div class="alert good">✅ You win. (New Run to play again.)</div>` : ""}
-    ${RUN.lost ? `<div class="alert bad">❌ Run ended: ${RUN.lossReason}</div>` : ""}
-  `;
+    ${RUN.won ? `<div class="alert good">OK You win. (New Run to play again.)</div>` : ""}
+    ${RUN.lost ? `<div class="alert bad">FAIL Run ended: ${RUN.lossReason}</div>` : ""}
+  ` + milestonesHtml;
 
   $("#dashboard").innerHTML = html;
 }
@@ -840,8 +934,8 @@ function renderActionBar(){
     </div>
 
     <div class="actionbar-mid">
-      <div class="mono">Queued spend: ₡${fmt(spend,0)} • Projected after income: ₡${fmt(projected,0)}</div>
-      ${payload ? `<div class="mono small">Payload: ${fmt(payloadMass,0)} t • Payload launch cost: ₡${fmt(payloadCost,0)}</div>` : `<div class="mono small muted">Queue builds/research/test flight/payload, then End Turn.</div>`}
+      <div class="mono">Queued spend: C${fmt(spend,0)}  |  Projected after income: C${fmt(projected,0)}</div>
+      ${payload ? `<div class="mono small">Payload: ${fmt(payloadMass,0)} t  |  Payload launch cost: C${fmt(payloadCost,0)}</div>` : `<div class="mono small muted">Queue builds/research/test flight/payload, then End Turn.</div>`}
     </div>
 
     <div class="actionbar-right">
@@ -880,7 +974,7 @@ function renderEarthTab(){
         <div class="kpi">
           <div class="label">Curtailment (typical)</div>
           <div class="value mono">${fmt(der.curtailmentTW,1)} TW</div>
-          <div class="hint">Storage absorbs ${fmt(earth.batteryBlocks*0.6,1)} TW • Grid bonus ${fmt(earth.hvSegments*0.3,1)} TW</div>
+          <div class="hint">Storage absorbs ${fmt(earth.batteryBlocks*0.6,1)} TW  |  Grid bonus ${fmt(earth.hvSegments*0.3,1)} TW</div>
         </div>
         <div class="kpi">
           <div class="label">Variable share</div>
@@ -903,7 +997,9 @@ function renderEarthTab(){
     const available = buildAvailable(b);
     const cost = applyCostModifiers(b.cost, b.id);
     const count = getBuildCount(b.id);
-    const lockedReason = available ? "" : `Requires ${b.techPrereq}`;
+    const reasons = [];
+    if(!available) reasons.push(`Requires tech: ${b.techPrereq}`);
+    if(!canAfford(cost)) reasons.push(`Insufficient credits: need ${formatCredits(cost)}, remaining ${formatCredits(creditsRemaining())}`);
 
     const effects = [];
     const d = b.deltas || {};
@@ -916,26 +1012,27 @@ function renderEarthTab(){
     if(d.heatStress) effects.push(`${d.heatStress>0?"+":""}${fmt(d.heatStress,1)} heat`);
     if(d.batteryBlocks) effects.push(`+${d.batteryBlocks} battery`);
     if(d.hvSegments) effects.push(`+${d.hvSegments} HV`);
-    if(d.hydrogenPlants) effects.push(`+${d.hydrogenPlants} H₂`);
+    if(d.hydrogenPlants) effects.push(`+${d.hydrogenPlants} H2`);
     if(d.demandResponsePrograms) effects.push(`+${d.demandResponsePrograms} DR`);
 
-    const canQueue = available && !RUN.won && !RUN.lost;
+    const canQueue = (reasons.length===0) && !RUN.won && !RUN.lost;
 
     return `
       <div class="card">
         <div class="card-header">
           <div>
             <div class="card-title">${b.name} <span class="chip muted">Owned: ${count}</span></div>
-            <div class="card-subtitle">${effects.join(" • ") || "—"}</div>
+            <div class="card-subtitle">${effects.join("  |  ") || "--"}</div>
           </div>
           <div class="right">
-            <div class="mono">₡${fmt(cost,0)}</div>
-            <div class="hint">${available ? "" : lockedReason}</div>
+            <div class="mono">${formatCredits(cost)}</div>
+            <div class="hint">${reasons.length?reasons[0]:""}</div>
           </div>
         </div>
         <div class="card-body">
-          <button class="btn btn-primary" data-build="${b.id}" ${canQueue?"":"disabled"}>Queue build</button>
+          <button class="btn btn-primary" data-build="${b.id}" ${canQueue?"":"disabled"} title="${reasons.join(" | ")}">Queue build</button>
           <button class="btn btn-ghost" data-build-info="${b.id}">Info</button>
+          ${reasons.length?`<div class="req">${reasons.map(reasonLine).join("")}</div>`:""}
         </div>
       </div>
     `;
@@ -951,6 +1048,16 @@ function renderEarthTab(){
 
   $$('[data-build]').forEach(btn=>btn.addEventListener('click', (e)=>{
     const id = e.currentTarget.getAttribute('data-build');
+    const b = CONFIG.earthBuilds.find(x=>x.id===id);
+    if(!b) return;
+    if(!buildAvailable(b)){
+      toast(`Locked: requires tech ${b.techPrereq}`);
+      return;
+    }
+    const cost = applyCostModifiers(b.cost, b.id);
+    if(!budgetGuard(cost, b.name)){
+      return;
+    }
     RUN.queue.push({ kind:"earthBuild", buildId:id });
     render(); saveRun();
   }));
@@ -975,25 +1082,30 @@ function renderTechTab(){
   const techCards = CONFIG.techs.map(t=>{
     const isRes = hasTech(t.id);
     const avail = techAvailable(t);
-    const prereq = t.prereqs.length ? `Prereqs: ${t.prereqs.join(", ")}` : "Prereqs: —";
-    const unlocks = t.unlocks?.length ? t.unlocks.join(", ") : "—";
-
-    const canQueue = avail && !isRes && !queueHas("research") && !RUN.won && !RUN.lost;
+    const prereq = t.prereqs.length ? `Prereqs: ${t.prereqs.join(", ")}` : "Prereqs: --";
+    const unlocks = t.unlocks?.length ? t.unlocks.join(", ") : "--";
+    const reasons = [];
+    if(isRes) reasons.push("Already researched");
+    if(!avail) reasons.push(`Missing prereqs: ${t.prereqs.filter(p=>!hasTech(p)).join(", ")}`);
+    if(queueHas("research")) reasons.push("One research per turn");
+    if(!canAfford(t.cost)) reasons.push(`Insufficient credits: need ${formatCredits(t.cost)}, remaining ${formatCredits(creditsRemaining())}`);
+    const canQueue = (reasons.length===0) && !RUN.won && !RUN.lost;
 
     return `
       <div class="card">
         <div class="card-header">
           <div>
             <div class="card-title">${t.name} ${isRes?'<span class="chip good">Researched</span>':(avail?'<span class="chip good">Available</span>':'<span class="chip muted">Locked</span>')}</div>
-            <div class="card-subtitle"><span class="mono">${t.id}</span> • ₡${fmt(t.cost,0)}</div>
+            <div class="card-subtitle"><span class="mono">${t.id}</span>  |  ${formatCredits(t.cost)}</div>
           </div>
         </div>
         <div class="card-body">
           <div class="muted small">${prereq}</div>
           <div class="muted small">Unlocks: ${unlocks}</div>
           <div style="margin-top:10px">
-            <button class="btn btn-primary" data-tech="${t.id}" ${canQueue?"":"disabled"}>Queue research</button>
+            <button class="btn btn-primary" data-tech="${t.id}" ${canQueue?"":"disabled"} title="${reasons.join(" | ")}">Queue research</button>
             <button class="btn btn-ghost" data-tech-info="${t.id}">Info</button>
+            ${reasons.length?`<div class="req">${reasons.map(reasonLine).join("")}</div>`:""}
           </div>
         </div>
       </div>
@@ -1010,7 +1122,7 @@ function renderTechTab(){
           </div>
         </div>
         <div class="card-body">
-          <div class="muted">Queued: <span class="mono">${queueFind("research")?.techId || "—"}</span></div>
+          <div class="muted">Queued: <span class="mono">${queueFind("research")?.techId || "--"}</span></div>
         </div>
       </div>
       <div class="section-title">Tech Tree</div>
@@ -1020,7 +1132,24 @@ function renderTechTab(){
 
   $$('[data-tech]').forEach(btn=>btn.addEventListener('click', (e)=>{
     const id = e.currentTarget.getAttribute('data-tech');
-    if(queueHas("research")) return;
+    const t = CONFIG.techs.find(x=>x.id===id);
+    if(!t) return;
+    if(queueHas("research")){
+      toast("One research per turn.");
+      return;
+    }
+    if(hasTech(id)){
+      toast("Already researched.");
+      return;
+    }
+    if(!techAvailable(t)){
+      const miss = (t.prereqs||[]).filter(p=>!hasTech(p));
+      toast(`Locked: missing prereqs ${miss.join(", ")||"--"}`);
+      return;
+    }
+    if(!budgetGuard(t.cost, t.name)){
+      return;
+    }
     RUN.queue.push({ kind:"research", techId:id });
     render(); saveRun();
   }));
@@ -1030,11 +1159,11 @@ function renderTechTab(){
     const t = CONFIG.techs.find(x=>x.id===id);
     if(!t) return;
     showModal(t.name, `
-      <div class="muted">Cost: <span class="mono">₡${fmt(t.cost,0)}</span></div>
-      <div class="muted">Prereqs: <span class="mono">${t.prereqs.join(", ") || "—"}</span></div>
+      <div class="muted">Cost: <span class="mono">C${fmt(t.cost,0)}</span></div>
+      <div class="muted">Prereqs: <span class="mono">${t.prereqs.join(", ") || "--"}</span></div>
       <hr>
       <div class="muted">Unlocks:</div>
-      <div class="mono">${(t.unlocks||[]).join("<br>") || "—"}</div>
+      <div class="mono">${(t.unlocks||[]).join("<br>") || "--"}</div>
     `);
   }));
 }
@@ -1051,7 +1180,7 @@ function renderSpaceTab(){
 
   const launchAssetsHtml = launchAssets.map(a=>{
     const owned = hasBuilt(a.id);
-    return `<span class="chip ${owned?"good":"muted"}">${owned?"✅":"—"} ${a.name}</span>`;
+    return `<span class="chip ${owned?"good":"muted"}">${owned?"OK":"--"} ${a.name}</span>`;
   }).join(" ");
 
   const testFlightHtml = CONFIG.actions.map(a=>{
@@ -1060,29 +1189,32 @@ function renderSpaceTab(){
     const lrlOk = sp.launchReadinessLevel >= (a.minLRL||0);
     const cooldownOk = sp.testFlightCooldownTurns === 0;
 
-    const enabled = reqTechOk && reqBuildOk && lrlOk && cooldownOk && !RUN.won && !RUN.lost;
+    const reasons = [];
+    if(a.requiresTech && !reqTechOk) reasons.push(`Requires tech: ${a.requiresTech}`);
+    for(const b of (a.requires||[])) if(!hasBuilt(b)) reasons.push(`Requires: ${b}`);
+    if(!lrlOk) reasons.push(`Requires LRL >= ${a.minLRL}`);
+    if(!cooldownOk) reasons.push(`Cooldown: ${sp.testFlightCooldownTurns} turn(s)`);
+    if(queueHas("testFlight")) reasons.push("One test flight per turn");
+    if(!canAfford(a.flightCost)) reasons.push(`Insufficient credits: need ${formatCredits(a.flightCost)}, remaining ${formatCredits(creditsRemaining())}`);
+
+    const enabled = (reasons.length===0) && !RUN.won && !RUN.lost;
 
     const fail = currentFailureChance(a);
-
-    const missing = [];
-    if(a.requiresTech && !reqTechOk) missing.push(`Tech ${a.requiresTech}`);
-    for(const b of (a.requires||[])) if(!hasBuilt(b)) missing.push(b);
-    if(!lrlOk) missing.push(`LRL ≥ ${a.minLRL}`);
-    if(!cooldownOk) missing.push(`Cooldown ${sp.testFlightCooldownTurns}`);
 
     return `
       <div class="card">
         <div class="card-header">
           <div>
             <div class="card-title">${a.name}</div>
-            <div class="card-subtitle">Cost ₡${fmt(a.flightCost,0)} • Failure chance <span class="mono">${fmt(fail,0)}%</span></div>
+            <div class="card-subtitle">Cost ${formatCredits(a.flightCost)}  |  Failure chance <span class="mono">${fmt(fail,0)}%</span></div>
           </div>
           <div class="right">
-            <div class="hint">${missing.length?`Needs: ${missing.join(", ")}`:""}</div>
+            <div class="hint">${reasons.length?reasons[0]:""}</div>
           </div>
         </div>
         <div class="card-body">
-          <button class="btn btn-primary" data-testflight="${a.id}" ${enabled?"":"disabled"}>Queue test flight</button>
+          <button class="btn btn-primary" data-testflight="${a.id}" ${enabled?"":"disabled"} title="${reasons.join(" | ")}">Queue test flight</button>
+          ${reasons.length?`<div class="req">${reasons.map(reasonLine).join("")}</div>`:""}
         </div>
       </div>
     `;
@@ -1106,9 +1238,10 @@ function renderSpaceTab(){
     if(prov.servicing) effects.push(`Servicing`);
 
     const lock = [];
-    if(!techOk) lock.push(`Tech ${p.techPrereq}`);
-    if(!canLaunch) lock.push(`LRL ≥ 2`);
-    if(!lrlOk) lock.push(`LRL ≥ ${lrlReq}`);
+    if(!techOk) lock.push(`Missing tech prereq: ${p.techPrereq}`);
+    if(!canLaunch) lock.push("LRL gate: requires LRL >= 2");
+    if(!lrlOk) lock.push(`LRL gate: requires LRL >= ${lrlReq}`);
+    if(!canAfford(p.cost)) lock.push(`Insufficient credits: need ${formatCredits(p.cost)}, remaining ${formatCredits(creditsRemaining())}`);
 
     const selected = (queueFind("payloadLaunch")?.partIds || []).includes(p.id);
 
@@ -1117,15 +1250,16 @@ function renderSpaceTab(){
         <div class="card-header">
           <div>
             <div class="card-title">${p.name} ${selected?'<span class="chip good">Selected</span>':""}</div>
-            <div class="card-subtitle">₡${fmt(p.cost,0)} • ${fmt(p.mass_t,0)} t • ${effects.join(" • ") || "—"}</div>
+            <div class="card-subtitle">C${fmt(p.cost,0)}  |  ${fmt(p.mass_t,0)} t  |  ${effects.join("  |  ") || "--"}</div>
           </div>
           <div class="right">
             <div class="hint">${lock.length?`Locked: ${lock.join(", ")}`:""}</div>
           </div>
         </div>
         <div class="card-body">
-          <button class="btn btn-primary" data-part-add="${p.id}" ${available && !RUN.won && !RUN.lost?"":"disabled"}>Add to manifest</button>
+          <button class="btn btn-primary" data-part-add="${p.id}" ${available && !RUN.won && !RUN.lost?"":"disabled"} title="${lock.join(" | ")}">Add to manifest</button>
           <button class="btn btn-ghost" data-part-remove="${p.id}" ${selected?"":"disabled"}>Remove</button>
+          ${lock.length?`<div class="req">${lock.map(reasonLine).join("")}</div>`:""}
         </div>
       </div>
     `;
@@ -1138,11 +1272,16 @@ function renderSpaceTab(){
   const partsCost = manifestParts.reduce((s,p)=>s+(p.cost||0),0);
   const payloadCost = computePayloadLaunchCost(mass);
 
-  const queuePayloadEnabled = canLaunchPayload() && manifest.length>0 && !queueHas("payloadLaunch") && !RUN.won && !RUN.lost;
+  const queuePayloadReasons = [];
+  if(!canLaunchPayload()) queuePayloadReasons.push("LRL gate: requires LRL >= 2");
+  if(manifest.length===0) queuePayloadReasons.push("Add at least one part to manifest");
+  if(queueHas("payloadLaunch")) queuePayloadReasons.push("Payload launch already queued");
+  if(manifest.length > 0 && !canAfford(partsCost + payloadCost)) queuePayloadReasons.push(`Insufficient credits: need ${formatCredits(partsCost + payloadCost)}, remaining ${formatCredits(creditsRemaining())}`);
+  const queuePayloadEnabled = queuePayloadReasons.length===0 && !RUN.won && !RUN.lost;
   const alreadyQueuedPayload = queueHas("payloadLaunch");
 
   const manifestHtml = manifestParts.length ? `
-    <div class="mono small">${manifestParts.map(p=>`• ${p.name} (${fmt(p.mass_t,0)}t)`).join("<br>")}</div>
+    <div class="mono small">${manifestParts.map(p=>`- ${p.name} (${fmt(p.mass_t,0)}t)`).join("<br>")}</div>
   ` : `<div class="muted">No parts selected.</div>`;
 
   $("#panel-space").innerHTML = `
@@ -1151,11 +1290,11 @@ function renderSpaceTab(){
         <div class="card-header">
           <div>
             <div class="card-title">Launch Program</div>
-            <div class="card-subtitle">Build capability (LRL 0→3) before deploying orbital compute.</div>
+            <div class="card-subtitle">Build capability (LRL 0->3) before deploying orbital compute.</div>
           </div>
           <div class="right">
             <div class="mono">LRL ${sp.launchReadinessLevel}</div>
-            <div class="hint">Successes ${sp.successfulFlights} • Failures ${sp.failedFlights}</div>
+            <div class="hint">Successes ${sp.successfulFlights}  |  Failures ${sp.failedFlights}</div>
           </div>
         </div>
         <div class="card-body">
@@ -1175,7 +1314,7 @@ function renderSpaceTab(){
           <div class="kpi"><div class="label">Orbit Power</div><div class="value mono">${fmt(orbit.orbitPowerMW,0)} MW</div></div>
           <div class="kpi"><div class="label">Radiators</div><div class="value mono">${fmt(orbit.radiatorMWth,0)} MWth</div></div>
           <div class="kpi"><div class="label">Compute Load</div><div class="value mono">${fmt(orbit.effectiveComputeLoadMW,0)} MW</div><div class="hint">(capped by orbit power)</div></div>
-          <div class="kpi"><div class="label">Throttle</div><div class="value mono">${fmt(orbit.throttleFactor*100,0)}%</div><div class="hint">Need radiators ≈ compute for 100%</div></div>
+          <div class="kpi"><div class="label">Throttle</div><div class="value mono">${fmt(orbit.throttleFactor*100,0)}%</div><div class="hint">Need radiators ~ compute for 100%</div></div>
           <div class="kpi"><div class="label">ODC Delivered</div><div class="value mono">${fmt(sp.totalComputeDelivered,0)} CU</div></div>
           <div class="kpi"><div class="label">ODC Turns</div><div class="value mono">${sp.odcTurnsOperational}</div></div>
         </div>
@@ -1185,7 +1324,7 @@ function renderSpaceTab(){
         <div class="card-header">
           <div>
             <div class="card-title">Orbit Assembly</div>
-            <div class="card-subtitle">Select parts into a manifest, then queue a payload launch (LRL ≥ 2).</div>
+            <div class="card-subtitle">Select parts into a manifest, then queue a payload launch (LRL >= 2).</div>
           </div>
           <div class="right">
             <div class="hint">Payload launch cost scales with mass.</div>
@@ -1202,15 +1341,15 @@ function renderSpaceTab(){
               <div class="card-body">
                 ${manifestHtml}
                 <hr>
-                <div class="mono">Parts cost: ₡${fmt(partsCost,0)}</div>
+                <div class="mono">Parts cost: C${fmt(partsCost,0)}</div>
                 <div class="mono">Payload mass: ${fmt(mass,0)} t</div>
-                <div class="mono">Payload launch cost: ₡${fmt(payloadCost,0)}</div>
-                <div class="mono" style="margin-top:8px">Total: ₡${fmt(partsCost + payloadCost,0)}</div>
+                <div class="mono">Payload launch cost: C${fmt(payloadCost,0)}</div>
+                <div class="mono" style="margin-top:8px">Total: C${fmt(partsCost + payloadCost,0)}</div>
                 <div style="margin-top:10px">
-                  <button class="btn btn-primary" id="btn-queue-payload" ${queuePayloadEnabled && !alreadyQueuedPayload?"":"disabled"}>Queue payload launch</button>
+                  <button class="btn btn-primary" id="btn-queue-payload" ${queuePayloadEnabled && !alreadyQueuedPayload?"":"disabled"} title="${queuePayloadReasons.join(" | ")}">Queue payload launch</button>
                   <button class="btn btn-ghost" id="btn-clear-manifest" ${manifest.length?"":"disabled"}>Clear manifest</button>
                 </div>
-                ${!canLaunchPayload()?`<div class="alert warn" style="margin-top:10px">Locked: reach LRL ≥ 2 to launch orbital payloads.</div>`:""}
+                ${queuePayloadReasons.length?`<div class="req">${queuePayloadReasons.map(reasonLine).join("")}</div>`:""}
               </div>
             </div>
           </div>
@@ -1222,11 +1361,33 @@ function renderSpaceTab(){
 
   // Test flight handlers
   $$('[data-testflight]').forEach(btn=>btn.addEventListener('click',(e)=>{
+    const id = e.currentTarget.getAttribute('data-testflight');
+    const action = CONFIG.actions.find(a=>a.id===id);
+    if(!action) return;
     if(queueHas("testFlight")){
-      toast("Only one test flight can be queued per turn.");
+      toast("One test flight per turn.");
       return;
     }
-    const id = e.currentTarget.getAttribute('data-testflight');
+    if(action.requiresTech && !hasTech(action.requiresTech)){
+      toast(`Locked: missing tech prereq ${action.requiresTech}.`);
+      return;
+    }
+    const missingBuild = (action.requires||[]).find(bid=>!hasBuilt(bid));
+    if(missingBuild){
+      toast(`Locked: missing required build ${missingBuild}.`);
+      return;
+    }
+    if(sp.launchReadinessLevel < (action.minLRL||0)){
+      toast(`Locked: LRL gate requires LRL >= ${action.minLRL || 0}.`);
+      return;
+    }
+    if(sp.testFlightCooldownTurns > 0){
+      toast(`Test flight cooldown: ${sp.testFlightCooldownTurns} turn(s) remaining.`);
+      return;
+    }
+    if(!budgetGuard(action.flightCost, action.name)){
+      return;
+    }
     RUN.queue.push({ kind:"testFlight", actionId:id });
     render(); saveRun();
   }));
@@ -1234,12 +1395,55 @@ function renderSpaceTab(){
   // Manifest add/remove
   $$('[data-part-add]').forEach(btn=>btn.addEventListener('click',(e)=>{
     const id = e.currentTarget.getAttribute('data-part-add');
+    const part = CONFIG.orbitParts.find(p=>p.id===id);
+    if(!part) return;
+
+    // prereqs
+    if(!canLaunchPayload()){
+      toast("Locked: need LRL >= 2 to launch payloads.");
+      return;
+    }
+    if(part.techPrereq && !hasTech(part.techPrereq)){
+      toast(`Locked: requires tech ${part.techPrereq}`);
+      return;
+    }
+    const lrlReq = part.requiresLRL ?? (id.startsWith("P_COMPUTE_RACK") ? 3 : 0);
+    if(RUN.state.space.launchReadinessLevel < lrlReq){
+      toast(`Locked: requires LRL >= ${lrlReq}`);
+      return;
+    }
+
+    // compute prospective cost impact
     let pl = queueFind("payloadLaunch");
+    const currentIds = pl?.partIds ? [...pl.partIds] : [];
+    if(currentIds.includes(id)){
+      toast("Already in manifest.");
+      return;
+    }
+    const nextIds = [...currentIds, id];
+    const nextParts = nextIds.map(pid=>CONFIG.orbitParts.find(p=>p.id===pid)).filter(Boolean);
+    const nextMass = nextParts.reduce((s,p)=>s+(p.mass_t||0),0);
+    const nextPartsCost = nextParts.reduce((s,p)=>s+(p.cost||0),0);
+    const nextPayloadCost = computePayloadLaunchCost(nextMass);
+    const nextTotal = nextPartsCost + nextPayloadCost;
+
+    // current payload total (if any)
+    const curParts = currentIds.map(pid=>CONFIG.orbitParts.find(p=>p.id===pid)).filter(Boolean);
+    const curMass = curParts.reduce((s,p)=>s+(p.mass_t||0),0);
+    const curPartsCost = curParts.reduce((s,p)=>s+(p.cost||0),0);
+    const curPayloadCost = currentIds.length ? computePayloadLaunchCost(curMass) : 0;
+    const curTotal = currentIds.length ? (curPartsCost + curPayloadCost) : 0;
+
+    const incremental = nextTotal - curTotal;
+    if(!budgetGuard(incremental, `${part.name} manifest add`)){
+      return;
+    }
+
     if(!pl){
       pl = { kind:"payloadLaunch", partIds:[], payloadMass_t:0 };
       RUN.queue.push(pl);
     }
-    if(!pl.partIds.includes(id)) pl.partIds.push(id);
+    pl.partIds = nextIds;
     // recompute mass
     pl.payloadMass_t = pl.partIds.map(pid=>CONFIG.orbitParts.find(p=>p.id===pid)).filter(Boolean).reduce((s,p)=>s+(p.mass_t||0),0);
     render(); saveRun();
@@ -1258,7 +1462,13 @@ function renderSpaceTab(){
   }));
 
   $('#btn-queue-payload')?.addEventListener('click',()=>{
-    // payload already represented by payloadLaunch queue item
+    if(queuePayloadReasons.length){
+      toast(`Cannot queue payload launch: ${queuePayloadReasons[0]}`);
+      return;
+    }
+    if(!budgetGuard(partsCost + payloadCost, "payload launch")){
+      return;
+    }
     toast("Payload launch queued.");
     render(); saveRun();
   });
@@ -1284,16 +1494,16 @@ function renderReportsTab(){
   const tf = r.testFlightResult;
   const tfHtml = tf ? `
     <div class="mono small">
-      ${tf.actionId}: ${tf.ok ? "✅ Success" : "❌ Failed"}
-      ${tf.failChance != null ? ` • FailChance ${fmt(tf.failChance,0)}% • Roll ${fmt(tf.roll,0)}` : ""}
+      ${tf.actionId}: ${tf.ok ? "OK Success" : "FAIL Failed"}
+      ${tf.failChance != null ? `  |  FailChance ${fmt(tf.failChance,0)}%  |  Roll ${fmt(tf.roll,0)}` : ""}
     </div>
   ` : `<div class="muted">No test flight.</div>`;
 
   const pl = r.payloadResult;
   const plHtml = pl ? `
     <div class="mono small">
-      Payload launch: ${pl.ok?"✅":"❌"}
-      ${pl.launchFailure?" • Launch failure event hit":""}
+      Payload launch: ${pl.ok?"OK":"FAIL"}
+      ${pl.launchFailure?"  |  Launch failure event hit":""}
       ${pl.lostParts?.length?`<br>Lost: ${pl.lostParts.join(", ")}`:""}
       ${pl.keptParts?.length?`<br>Kept: ${pl.keptParts.join(", ")}`:""}
     </div>
@@ -1310,8 +1520,8 @@ function renderReportsTab(){
         </div>
         <div class="card-body">
           <div class="section-title">Actions</div>
-          <div class="muted">Research: <span class="mono">${r.researchThisTurn || "—"}</span></div>
-          <div class="muted">Built: <span class="mono">${(r.builtThisTurn||[]).join(", ") || "—"}</span></div>
+          <div class="muted">Research: <span class="mono">${r.researchThisTurn || "--"}</span></div>
+          <div class="muted">Built: <span class="mono">${(r.builtThisTurn||[]).join(", ") || "--"}</span></div>
           <hr>
           <div class="section-title">Test Flight</div>
           ${tfHtml}
@@ -1356,11 +1566,11 @@ function renderReportsTab(){
       <div class="card">
         <div class="card-header"><div><div class="card-title">Finances</div><div class="card-subtitle">Where the money went.</div></div></div>
         <div class="card-body">
-          <div class="mono">Spent: ₡${fmt(r.finances.spent,0)}</div>
-          <div class="mono">Income: ₡${fmt(r.finances.income,0)}</div>
-          <div class="mono">Event Δ: ₡${fmt(r.finances.eventCreditsDelta,0)}</div>
+          <div class="mono">Spent: C${fmt(r.finances.spent,0)}</div>
+          <div class="mono">Income: C${fmt(r.finances.income,0)}</div>
+          <div class="mono">Event Delta: C${fmt(r.finances.eventCreditsDelta,0)}</div>
           <hr>
-          <div class="mono">End credits: ₡${fmt(r.finances.endCredits,0)}</div>
+          <div class="mono">End credits: C${fmt(r.finances.endCredits,0)}</div>
         </div>
       </div>
 
@@ -1412,3 +1622,4 @@ render();
   `;
   document.head.appendChild(style);
 })();
+
