@@ -251,7 +251,7 @@ function applyStagePresentation(preferredTab){
   document.body.style.setProperty("--stage-bg", `url("assets/bg/${image}")`);
 
   const chip = $("#stage-chip");
-  if(chip) chip.textContent = `${earthStage} / ${spaceStage} / ${mood.toUpperCase()}`;
+  if(chip) chip.textContent = `${earthStage} EARTH / ${spaceStage} ORBIT / ${mood.toUpperCase()}`;
 }
 
 function currentFailureChance(action){
